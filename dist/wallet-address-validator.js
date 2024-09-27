@@ -119,7 +119,7 @@ function base (ALPHABET) {
 }
 module.exports = base
 
-},{"safe-buffer":36}],2:[function(require,module,exports){
+},{"safe-buffer":37}],2:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -273,6 +273,178 @@ function fromByteArray (uint8) {
 }
 
 },{}],3:[function(require,module,exports){
+'use strict';
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.bech32m = exports.bech32 = void 0;
+const ALPHABET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const ALPHABET_MAP = {};
+for (let z = 0; z < ALPHABET.length; z++) {
+    const x = ALPHABET.charAt(z);
+    ALPHABET_MAP[x] = z;
+}
+function polymodStep(pre) {
+    const b = pre >> 25;
+    return (((pre & 0x1ffffff) << 5) ^
+        (-((b >> 0) & 1) & 0x3b6a57b2) ^
+        (-((b >> 1) & 1) & 0x26508e6d) ^
+        (-((b >> 2) & 1) & 0x1ea119fa) ^
+        (-((b >> 3) & 1) & 0x3d4233dd) ^
+        (-((b >> 4) & 1) & 0x2a1462b3));
+}
+function prefixChk(prefix) {
+    let chk = 1;
+    for (let i = 0; i < prefix.length; ++i) {
+        const c = prefix.charCodeAt(i);
+        if (c < 33 || c > 126)
+            return 'Invalid prefix (' + prefix + ')';
+        chk = polymodStep(chk) ^ (c >> 5);
+    }
+    chk = polymodStep(chk);
+    for (let i = 0; i < prefix.length; ++i) {
+        const v = prefix.charCodeAt(i);
+        chk = polymodStep(chk) ^ (v & 0x1f);
+    }
+    return chk;
+}
+function convert(data, inBits, outBits, pad) {
+    let value = 0;
+    let bits = 0;
+    const maxV = (1 << outBits) - 1;
+    const result = [];
+    for (let i = 0; i < data.length; ++i) {
+        value = (value << inBits) | data[i];
+        bits += inBits;
+        while (bits >= outBits) {
+            bits -= outBits;
+            result.push((value >> bits) & maxV);
+        }
+    }
+    if (pad) {
+        if (bits > 0) {
+            result.push((value << (outBits - bits)) & maxV);
+        }
+    }
+    else {
+        if (bits >= inBits)
+            return 'Excess padding';
+        if ((value << (outBits - bits)) & maxV)
+            return 'Non-zero padding';
+    }
+    return result;
+}
+function toWords(bytes) {
+    return convert(bytes, 8, 5, true);
+}
+function fromWordsUnsafe(words) {
+    const res = convert(words, 5, 8, false);
+    if (Array.isArray(res))
+        return res;
+}
+function fromWords(words) {
+    const res = convert(words, 5, 8, false);
+    if (Array.isArray(res))
+        return res;
+    throw new Error(res);
+}
+function getLibraryFromEncoding(encoding) {
+    let ENCODING_CONST;
+    if (encoding === 'bech32') {
+        ENCODING_CONST = 1;
+    }
+    else {
+        ENCODING_CONST = 0x2bc830a3;
+    }
+    function encode(prefix, words, LIMIT) {
+        LIMIT = LIMIT || 90;
+        if (prefix.length + 7 + words.length > LIMIT)
+            throw new TypeError('Exceeds length limit');
+        prefix = prefix.toLowerCase();
+        // determine chk mod
+        let chk = prefixChk(prefix);
+        if (typeof chk === 'string')
+            throw new Error(chk);
+        let result = prefix + '1';
+        for (let i = 0; i < words.length; ++i) {
+            const x = words[i];
+            if (x >> 5 !== 0)
+                throw new Error('Non 5-bit word');
+            chk = polymodStep(chk) ^ x;
+            result += ALPHABET.charAt(x);
+        }
+        for (let i = 0; i < 6; ++i) {
+            chk = polymodStep(chk);
+        }
+        chk ^= ENCODING_CONST;
+        for (let i = 0; i < 6; ++i) {
+            const v = (chk >> ((5 - i) * 5)) & 0x1f;
+            result += ALPHABET.charAt(v);
+        }
+        return result;
+    }
+    function __decode(str, LIMIT) {
+        LIMIT = LIMIT || 90;
+        if (str.length < 8)
+            return str + ' too short';
+        if (str.length > LIMIT)
+            return 'Exceeds length limit';
+        // don't allow mixed case
+        const lowered = str.toLowerCase();
+        const uppered = str.toUpperCase();
+        if (str !== lowered && str !== uppered)
+            return 'Mixed-case string ' + str;
+        str = lowered;
+        const split = str.lastIndexOf('1');
+        if (split === -1)
+            return 'No separator character for ' + str;
+        if (split === 0)
+            return 'Missing prefix for ' + str;
+        const prefix = str.slice(0, split);
+        const wordChars = str.slice(split + 1);
+        if (wordChars.length < 6)
+            return 'Data too short';
+        let chk = prefixChk(prefix);
+        if (typeof chk === 'string')
+            return chk;
+        const words = [];
+        for (let i = 0; i < wordChars.length; ++i) {
+            const c = wordChars.charAt(i);
+            const v = ALPHABET_MAP[c];
+            if (v === undefined)
+                return 'Unknown character ' + c;
+            chk = polymodStep(chk) ^ v;
+            // not in the checksum?
+            if (i + 6 >= wordChars.length)
+                continue;
+            words.push(v);
+        }
+        if (chk !== ENCODING_CONST)
+            return 'Invalid checksum for ' + str;
+        return { prefix, words };
+    }
+    function decodeUnsafe(str, LIMIT) {
+        const res = __decode(str, LIMIT);
+        if (typeof res === 'object')
+            return res;
+    }
+    function decode(str, LIMIT) {
+        const res = __decode(str, LIMIT);
+        if (typeof res === 'object')
+            return res;
+        throw new Error(res);
+    }
+    return {
+        decodeUnsafe,
+        decode,
+        encode,
+        toWords,
+        fromWordsUnsafe,
+        fromWords,
+    };
+}
+exports.bech32 = getLibraryFromEncoding('bech32');
+exports.bech32m = getLibraryFromEncoding('bech32m');
+
+},{}],4:[function(require,module,exports){
 (function (Buffer){(function (){
 /* bignumber.js v1.3.0 https://github.com/MikeMcl/bignumber.js/LICENCE */
 
@@ -2390,7 +2562,7 @@ P['valueOf'] = function () {
 module.exports = BigNumber;
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":4}],4:[function(require,module,exports){
+},{"buffer":5}],5:[function(require,module,exports){
 /*!
  * The buffer module from node.js, for the browser.
  *
@@ -4169,7 +4341,7 @@ function numberIsNaN (obj) {
   return obj !== obj // eslint-disable-line no-self-compare
 }
 
-},{"base64-js":2,"ieee754":31}],5:[function(require,module,exports){
+},{"base64-js":2,"ieee754":32}],6:[function(require,module,exports){
 /*
  * The MIT License (MIT)
  *
@@ -4577,62 +4749,62 @@ else if (!global.CBOR)
 
 })(this);
 
-},{}],6:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc1').default;
 
-},{"./es6/crc1":17}],7:[function(require,module,exports){
+},{"./es6/crc1":18}],8:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16').default;
 
-},{"./es6/crc16":18}],8:[function(require,module,exports){
+},{"./es6/crc16":19}],9:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16ccitt').default;
 
-},{"./es6/crc16ccitt":19}],9:[function(require,module,exports){
+},{"./es6/crc16ccitt":20}],10:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16kermit').default;
 
-},{"./es6/crc16kermit":20}],10:[function(require,module,exports){
+},{"./es6/crc16kermit":21}],11:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16modbus').default;
 
-},{"./es6/crc16modbus":21}],11:[function(require,module,exports){
+},{"./es6/crc16modbus":22}],12:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16xmodem').default;
 
-},{"./es6/crc16xmodem":22}],12:[function(require,module,exports){
+},{"./es6/crc16xmodem":23}],13:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc24').default;
 
-},{"./es6/crc24":23}],13:[function(require,module,exports){
+},{"./es6/crc24":24}],14:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc32').default;
 
-},{"./es6/crc32":24}],14:[function(require,module,exports){
+},{"./es6/crc32":25}],15:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc8').default;
 
-},{"./es6/crc8":25}],15:[function(require,module,exports){
+},{"./es6/crc8":26}],16:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc81wire').default;
 
-},{"./es6/crc81wire":26}],16:[function(require,module,exports){
+},{"./es6/crc81wire":27}],17:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crcjam').default;
 
-},{"./es6/crcjam":27}],17:[function(require,module,exports){
+},{"./es6/crcjam":28}],18:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4668,7 +4840,7 @@ var crc1 = (0, _define_crc2.default)('crc1', function (buf, previous) {
 
 exports.default = crc1;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],18:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],19:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4708,7 +4880,7 @@ var crc16 = (0, _define_crc2.default)('crc-16', function (buf, previous) {
 
 exports.default = crc16;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],19:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],20:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4748,7 +4920,7 @@ var crc16ccitt = (0, _define_crc2.default)('ccitt', function (buf, previous) {
 
 exports.default = crc16ccitt;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],20:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],21:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4788,7 +4960,7 @@ var crc16kermit = (0, _define_crc2.default)('kermit', function (buf, previous) {
 
 exports.default = crc16kermit;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],21:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],22:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4828,7 +5000,7 @@ var crc16modbus = (0, _define_crc2.default)('crc-16-modbus', function (buf, prev
 
 exports.default = crc16modbus;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],22:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],23:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4871,7 +5043,7 @@ var crc16xmodem = (0, _define_crc2.default)('xmodem', function (buf, previous) {
 
 exports.default = crc16xmodem;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],23:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],24:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4911,7 +5083,7 @@ var crc24 = (0, _define_crc2.default)('crc-24', function (buf, previous) {
 
 exports.default = crc24;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],24:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],25:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4951,7 +5123,7 @@ var crc32 = (0, _define_crc2.default)('crc-32', function (buf, previous) {
 
 exports.default = crc32;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],25:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],26:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4991,7 +5163,7 @@ var crc8 = (0, _define_crc2.default)('crc-8', function (buf, previous) {
 
 exports.default = crc8;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],26:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],27:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -5031,7 +5203,7 @@ var crc81wire = (0, _define_crc2.default)('dallas-1-wire', function (buf, previo
 
 exports.default = crc81wire;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],27:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],28:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -5073,7 +5245,7 @@ var crcjam = (0, _define_crc2.default)('jam', function (buf) {
 
 exports.default = crcjam;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],28:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],29:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -5089,7 +5261,7 @@ function (val) {
 
 exports.default = createBuffer;
 
-},{"buffer":4}],29:[function(require,module,exports){
+},{"buffer":5}],30:[function(require,module,exports){
 "use strict";
 
 Object.defineProperty(exports, "__esModule", {
@@ -5107,7 +5279,7 @@ exports.default = function (model, calc) {
   return fn;
 };
 
-},{}],30:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -5124,7 +5296,7 @@ module.exports = {
   crcjam: require('./crcjam')
 };
 
-},{"./crc1":6,"./crc16":7,"./crc16_ccitt":8,"./crc16_kermit":9,"./crc16_modbus":10,"./crc16_xmodem":11,"./crc24":12,"./crc32":13,"./crc8":14,"./crc8_1wire":15,"./crcjam":16}],31:[function(require,module,exports){
+},{"./crc1":7,"./crc16":8,"./crc16_ccitt":9,"./crc16_kermit":10,"./crc16_modbus":11,"./crc16_xmodem":12,"./crc24":13,"./crc32":14,"./crc8":15,"./crc8_1wire":16,"./crcjam":17}],32:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = (nBytes * 8) - mLen - 1
@@ -5210,7 +5382,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],32:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 (function (process,global){(function (){
 /*
  * [js-sha512]{@link https://github.com/emn178/js-sha512}
@@ -6141,7 +6313,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 })();
 
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"_process":35}],33:[function(require,module,exports){
+},{"_process":36}],34:[function(require,module,exports){
 /*
  A JavaScript implementation of the SHA family of hashes, as
  defined in FIPS PUB 180-4 and FIPS PUB 202, as well as the corresponding
@@ -6187,7 +6359,7 @@ new a(c[56],1575990012),new a(c[57],1125592928),new a(c[58],2716904306),new a(c[
 2618297676),new a(1288033470,3409855158),new a(1501505948,4234509866),new a(1607167915,987167468),new a(1816402316,1246189591)];Z=[new a(0,1),new a(0,32898),new a(2147483648,32906),new a(2147483648,2147516416),new a(0,32907),new a(0,2147483649),new a(2147483648,2147516545),new a(2147483648,32777),new a(0,138),new a(0,136),new a(0,2147516425),new a(0,2147483658),new a(0,2147516555),new a(2147483648,139),new a(2147483648,32905),new a(2147483648,32771),new a(2147483648,32770),new a(2147483648,128),new a(0,
 32778),new a(2147483648,2147483658),new a(2147483648,2147516545),new a(2147483648,32896),new a(0,2147483649),new a(2147483648,2147516424)];Y=[[0,36,3,41,18],[1,44,10,45,2],[62,6,43,15,61],[28,55,25,21,56],[27,20,39,8,14]];"function"===typeof define&&define.amd?define(function(){return C}):"undefined"!==typeof exports?("undefined"!==typeof module&&module.exports&&(module.exports=C),exports=C):aa.jsSHA=C})(this);
 
-},{}],34:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 (function (global){(function (){
 /**
  * Lodash (Custom Build) <https://lodash.com/>
@@ -8039,7 +8211,7 @@ function stubFalse() {
 module.exports = isEqual;
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],35:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -8225,7 +8397,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],36:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 /* eslint-disable node/no-deprecated-api */
 var buffer = require('buffer')
 var Buffer = buffer.Buffer
@@ -8289,7 +8461,7 @@ SafeBuffer.allocUnsafeSlow = function (size) {
   return buffer.SlowBuffer(size)
 }
 
-},{"buffer":4}],37:[function(require,module,exports){
+},{"buffer":5}],38:[function(require,module,exports){
 var cbor = require('cbor-js');
 var CRC = require('crc');
 var base58 = require('./crypto/base58');
@@ -8335,7 +8507,31 @@ module.exports = {
     }
 };
 
-},{"./bip173_validator":41,"./crypto/base58":44,"cbor-js":5,"crc":30}],38:[function(require,module,exports){
+},{"./bip173_validator":46,"./crypto/base58":51,"cbor-js":6,"crc":31}],39:[function(require,module,exports){
+var base58 = require('./crypto/base58')
+
+const ALLOWED_CHARS = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+
+var regexp = new RegExp('^(ak_)([' + ALLOWED_CHARS + ']+)$') // Begins with ak_ followed by
+
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    let match = regexp.exec(address)
+    if (match !== null) {
+      return this.verifyChecksum(match[2])
+    } else {
+      return false
+    }
+  },
+
+  verifyChecksum: function (address) {
+    var decoded = base58.decode(address)
+    decoded.splice(-4, 4) // remove last 4 elements. Why is base 58 adding them?
+    return decoded.length === 32
+  },
+}
+
+},{"./crypto/base58":51}],40:[function(require,module,exports){
 const cryptoUtils = require('./crypto/utils');
 
 const ALGORAND_CHECKSUM_BYTE_LENGTH = 4;
@@ -8365,7 +8561,38 @@ module.exports = {
     }
 }
 
-},{"./crypto/utils":52}],39:[function(require,module,exports){
+},{"./crypto/utils":59}],41:[function(require,module,exports){
+const ardorRegex = new RegExp('^ARDOR(-[A-Z0-9]{4}){3}(-[A-Z0-9]{5})$')
+
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    if (!ardorRegex.test(address)) {
+      return false
+    }
+
+    return true
+  },
+}
+
+},{}],42:[function(require,module,exports){
+const { bech32 } = require('bech32');
+
+const ALLOWED_CHARS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+
+var regexp = new RegExp('^(cosmos)1([' + ALLOWED_CHARS + ']+)$') // cosmos + bech32 separated by '1'
+
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    return regexp.exec(address) !== null;
+  },
+
+  verifyChecksum: function (address) {
+    const decoded = bech32.decode(address);
+    return decoded && decoded.words.length === 32;
+  },
+}
+
+},{"bech32":3}],43:[function(require,module,exports){
 const base58 = require('./crypto/base58');
 
 // simple base58 validator.  Just checks if it can be decoded.
@@ -8399,7 +8626,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/base58":44}],40:[function(require,module,exports){
+},{"./crypto/base58":51}],44:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
 var bech32 = require('./crypto/bech32');
 var BTCValidator = require('./bitcoin_validator');
@@ -8449,7 +8676,18 @@ module.exports = {
     }
 }
 
-},{"./bitcoin_validator":42,"./crypto/bech32":45,"./crypto/utils":52}],41:[function(require,module,exports){
+},{"./bitcoin_validator":47,"./crypto/bech32":52,"./crypto/utils":59}],45:[function(require,module,exports){
+module.exports = {
+  isValidAddress: function (address) {
+      var binanceAddress = address.slice(address.indexOf('bnb'));
+      if (binanceAddress.length !== 42) {
+          return false;
+      }
+      return true;
+  },
+};
+
+},{}],46:[function(require,module,exports){
 var bech32 = require('./crypto/bech32');
 
 // bip 173 bech 32 addresses (https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki)
@@ -8479,7 +8717,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/bech32":45}],42:[function(require,module,exports){
+},{"./crypto/bech32":52}],47:[function(require,module,exports){
 (function (Buffer){(function (){
 var base58 = require('./crypto/base58');
 var segwit = require('./crypto/segwit_addr');
@@ -8571,7 +8809,56 @@ module.exports = {
 };
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./crypto/base58":44,"./crypto/segwit_addr":50,"./crypto/utils":52,"buffer":4}],43:[function(require,module,exports){
+},{"./crypto/base58":51,"./crypto/segwit_addr":57,"./crypto/utils":59,"buffer":5}],48:[function(require,module,exports){
+var bech32 = require('./crypto/bech32');
+
+const validHrp = ['xch', 'txch']
+
+const isValidAddress = function(address) {
+    const decoded = bech32.decode(address, bech32.encodings.BECH32M);
+
+    if (decoded && validHrp.includes(decoded.hrp.toLowerCase())) {
+      return true
+    }
+
+    return false
+}
+
+module.exports = {
+    isValidAddress
+};
+
+},{"./crypto/bech32":52}],49:[function(require,module,exports){
+var bech32 = require("./crypto/bech32");
+
+const validHrp = {
+    main: ["core"],
+    testnet: ["testcore", "devcore"],
+};
+
+function isValidAddress(address, currency, opts) {
+    const { networkType } = opts || {};
+    const decoded = bech32.decode(address, bech32.encodings.BECH32);
+
+    let validByNetworkType = validHrp[networkType];
+    if (!validByNetworkType) {
+        validByNetworkType = validHrp.main;
+    }
+
+    if (decoded && validByNetworkType.includes(decoded.hrp.toLowerCase())) {
+        return true;
+    }
+
+    return false;
+}
+
+module.exports = {
+    isValidAddress: function (address, currency, networkType) {
+        return isValidAddress(address, currency, networkType);
+    },
+};
+
+},{"./crypto/bech32":52}],50:[function(require,module,exports){
 var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
  /**
@@ -8638,7 +8925,7 @@ module.exports = {
     b32decode: b32decode,
     b32encode: b32encode
 };
-},{}],44:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 // Base58 encoding/decoding
 // Originally written by Mike Hearn for BitcoinJ
 // Copyright (c) 2011 Google Inc
@@ -8686,7 +8973,7 @@ module.exports = {
     }
 };
 
-},{}],45:[function(require,module,exports){
+},{}],52:[function(require,module,exports){
 // Copyright (c) 2017, 2021 Pieter Wuille
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -8820,7 +9107,7 @@ function decode (bechString, enc) {
     return {hrp: hrp, data: data.slice(0, data.length - 6)};
 }
 
-},{}],46:[function(require,module,exports){
+},{}],53:[function(require,module,exports){
 /*
 	JavaScript BigInteger library version 0.9.1
 	http://silentmatt.com/biginteger/
@@ -10271,7 +10558,7 @@ function decode (bechString, enc) {
     
     exports.JSBigInt = BigInteger; // exports.BigInteger changed to exports.JSBigInt
     })(typeof exports !== 'undefined' ? exports : this);
-},{}],47:[function(require,module,exports){
+},{}],54:[function(require,module,exports){
 (function (Buffer){(function (){
 'use strict';
 
@@ -10463,7 +10750,7 @@ Blake256.prototype.digest = function (encoding) {
 module.exports = Blake256;
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":4}],48:[function(require,module,exports){
+},{"buffer":5}],55:[function(require,module,exports){
 'use strict';
 
 /**
@@ -10741,7 +11028,7 @@ function toHex (n) {
 
 module.exports = Blake2b;
 
-},{}],49:[function(require,module,exports){
+},{}],56:[function(require,module,exports){
 var JSBigInt = require('./biginteger')['JSBigInt'];
 
 /**
@@ -10968,7 +11255,7 @@ var cnBase58 = (function () {
     return b58;
 })();
 module.exports = cnBase58;
-},{"./biginteger":46}],50:[function(require,module,exports){
+},{"./biginteger":53}],57:[function(require,module,exports){
 // Copyright (c) 2017, 2021 Pieter Wuille
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -11093,7 +11380,7 @@ module.exports = {
     isValidAddress: isValidAddress,
 };
 
-},{"./bech32":45}],51:[function(require,module,exports){
+},{"./bech32":52}],58:[function(require,module,exports){
 (function (process,global){(function (){
 /**
  * [js-sha3]{@link https://github.com/emn178/js-sha3}
@@ -11737,7 +12024,7 @@ var f = function (s) {
 module.exports = methods;
 
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"_process":35}],52:[function(require,module,exports){
+},{"_process":36}],59:[function(require,module,exports){
 (function (Buffer){(function (){
 var jsSHA = require('jssha');
 var sha512256 = require('js-sha512').sha512_256
@@ -11873,626 +12160,1644 @@ module.exports = {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./base32":43,"./base58":44,"./blake256":47,"./blake2b":48,"./sha3":51,"browserify-bignum":3,"buffer":4,"js-sha512":32,"jssha":33}],53:[function(require,module,exports){
-var XRPValidator = require('./ripple_validator');
-var ETHValidator = require('./ethereum_validator');
-var BTCValidator = require('./bitcoin_validator');
-var ADAValidator = require('./ada_validator');
-var XMRValidator = require('./monero_validator');
-var NANOValidator = require('./nano_validator');
-var SCValidator = require('./siacoin_validator');
-var TRXValidator = require('./tron_validator');
-var NEMValidator = require('./nem_validator');
-var LSKValidator = require('./lisk_validator');
-var BCHValidator = require('./bch_validator');
-var XLMValidator = require('./stellar_validator');
-var EOSValidator = require('./eos_validator');
-var XTZValidator = require('./tezos_validator');
-var USDTValidator = require('./usdt_validator');
-var AlgoValidator = require('./algo_validator');
-var DotValidator = require('./dot_validator');
-var BIP173Validator = require('./bip173_validator')
-var Base58Validator = require('./base58_validator')
+},{"./base32":50,"./base58":51,"./blake256":54,"./blake2b":55,"./sha3":58,"browserify-bignum":4,"buffer":5,"js-sha512":33,"jssha":34}],60:[function(require,module,exports){
+var XRPValidator = require("./ripple_validator");
+var ETHValidator = require("./ethereum_validator");
+var BTCValidator = require("./bitcoin_validator");
+var ADAValidator = require("./ada_validator");
+var XMRValidator = require("./monero_validator");
+var NANOValidator = require("./nano_validator");
+var SCValidator = require("./siacoin_validator");
+var TRXValidator = require("./tron_validator");
+var NEMValidator = require("./nem_validator");
+var LSKValidator = require("./lisk_validator");
+var BCHValidator = require("./bch_validator");
+var XLMValidator = require("./stellar_validator");
+var EOSValidator = require("./eos_validator");
+var XTZValidator = require("./tezos_validator");
+var USDTValidator = require("./usdt_validator");
+var AlgoValidator = require("./algo_validator");
+var DotValidator = require("./dot_validator");
+var BIP173Validator = require("./bip173_validator");
+var Base58Validator = require("./base58_validator");
+// Chia
+var ChiaValidator = require("./chia_validator");
+// Harmony
+var HarmonyValidator = require("./harmony_validator");
+// from trezor
+var AEValidator = require("./ae_validator");
+var ARDRValidator = require("./ardr_validator");
+var ATOMValidator = require("./atom_validator");
+var BinanceValidator = require("./binance_validator");
+var HBARValidator = require("./hbar_validator");
+var ICXValidator = require("./icx_validator");
+var IOSTValidator = require("./iost_validator");
+// var IOTAValidator = require('./iota_validator');
+var NXTValidator = require("./nxt_validator");
+var STEEMValidator = require("./steem_validator");
+var SYSValidator = require("./sys_validator");
+var ZILValidator = require("./zil_validator");
+var PolymeshValidator = require("./polymesh_validator");
+var CoreumValidator = require("./coreum_validator");
 
-// defines P2PKH and P2SH address types for standard (prod) and testnet networks
-var CURRENCIES = [{
-        name: 'Bitcoin',
-        symbol: 'btc',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4', '3c', '26'] },
-        bech32Hrp: { prod: ['bc'], testnet: ['tb'] },
-        validator: BTCValidator
-    }, {
-        name: 'BitcoinCash',
-        symbol: 'bch',
-        regexp: '^[qQpP]{1}[0-9a-zA-Z]{41}$',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4'] },
-        validator: BCHValidator
-    }, {
-        name: 'Bitcoin SV',
-        symbol: 'bsv',
-        regexp: '^[qQ]{1}[0-9a-zA-Z]{41}$',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4'] },
-        validator: BCHValidator
-    }, {
-        name: 'LiteCoin',
-        symbol: 'ltc',
-        addressTypes: { prod: ['30', '05', '32'], testnet: ['6f', 'c4', '3a'] },
-        bech32Hrp: { prod: ['ltc'], testnet: ['tltc'] },
-        validator: BTCValidator
-    }, {
-        name: 'PeerCoin',
-        symbol: 'ppc',
-        addressTypes: { prod: ['37', '75'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'DogeCoin',
-        symbol: 'doge',
-        addressTypes: { prod: ['1e', '16'], testnet: ['71', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'BeaverCoin',
-        symbol: 'bvc',
-        addressTypes: { prod: ['19', '05'], testnet: ['6f', 'c4'] },
+// defines P2PKH, P2SH and bech32 address types for standard (prod) and testnet networks
+var CURRENCIES = [
+    {
+        name: "Bitcoin",
+        symbol: "btc",
+        segwitHrp: { prod: "bc", testnet: "tb", regtest: "bcrt" },
+        addressTypes: {
+            prod: ["00", "05"],
+            testnet: ["6f", "c4", "3c", "26"],
+            regtest: ["6f", "c4", "3c", "26"],
+        },
+        bech32Hrp: { prod: ["bc"], testnet: ["tb"] },
         validator: BTCValidator,
-    }, {
-        name: 'FreiCoin',
-        symbol: 'frc',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'ProtoShares',
-        symbol: 'pts',
-        addressTypes: { prod: ['38', '05'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'MegaCoin',
-        symbol: 'mec',
-        addressTypes: { prod: ['32', '05'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'PrimeCoin',
-        symbol: 'xpm',
-        addressTypes: { prod: ['17', '53'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'AuroraCoin',
-        symbol: 'aur',
-        addressTypes: { prod: ['17', '05'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'NameCoin',
-        symbol: 'nmc',
-        addressTypes: { prod: ['34'], testnet: [] },
-        validator: BTCValidator
-    }, {
-        name: 'BioCoin',
-        symbol: 'bio',
-        addressTypes: { prod: ['19', '14'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'GarliCoin',
-        symbol: 'grlc',
-        addressTypes: { prod: ['26', '05'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'VertCoin',
-        symbol: 'vtc',
-        addressTypes: { prod: ['0x', '47', '71', '05'], testnet: ['6f', 'c4'] },
-        bech32Hrp: { prod: ['vtc'], testnet: ['tvtc'] },
-        validator: BTCValidator
-
-    }, {
-        name: 'BitcoinGold',
-        symbol: 'btg',
-        addressTypes: { prod: ['26', '17'], testnet: ['6f', 'c4'] },
-        validator: BTCValidator
-    }, {
-        name: 'Komodo',
-        symbol: 'kmd',
-        addressTypes: { prod: ['3c', '55'], testnet: ['0', '5'] },
-        validator: BTCValidator
-    }, {
-        name: 'BitcoinZ',
-        symbol: 'btcz',
+    },
+    {
+        name: "BitcoinCash",
+        symbol: "bch",
+        regexp: "^[qQpP]{1}[0-9a-zA-Z]{41}$",
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4"] },
+        validator: BCHValidator,
+    },
+    {
+        name: "Bitcoin Diamond",
+        symbol: "bcd",
+        validator: BTCValidator,
+        addressTypes: { prod: ["00"] },
+    },
+    {
+        name: "Bitcoin SV",
+        symbol: "bsv",
+        regexp: "^[qQ]{1}[0-9a-zA-Z]{41}$",
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4"] },
+        validator: BCHValidator,
+    },
+    {
+        name: "Fujicoin",
+        symbol: "fjc",
+        segwitHrp: { prod: "fc", testnet: "tf" },
+        addressTypes: { prod: ["24", "10"], testnet: ["4a", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "LiteCoin",
+        symbol: "ltc",
+        segwitHrp: { prod: "ltc", testnet: "tltc" },
+        addressTypes: {
+            prod: ["30", "05", "32"],
+            testnet: ["6f", "c4", "3a"],
+        },
+        bech32Hrp: { prod: ["ltc"], testnet: ["tltc"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "PeerCoin",
+        symbol: "ppc",
+        addressTypes: { prod: ["37", "75"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "DogeCoin",
+        symbol: "doge",
+        addressTypes: { prod: ["1e", "16"], testnet: ["71", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "BeaverCoin",
+        symbol: "bvc",
+        addressTypes: { prod: ["19", "05"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "FreiCoin",
+        symbol: "frc",
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "ProtoShares",
+        symbol: "pts",
+        addressTypes: { prod: ["38", "05"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "MegaCoin",
+        symbol: "mec",
+        addressTypes: { prod: ["32", "05"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "PrimeCoin",
+        symbol: "xpm",
+        addressTypes: { prod: ["17", "53"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "AuroraCoin",
+        symbol: "aur",
+        addressTypes: { prod: ["17", "05"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "NameCoin",
+        symbol: "nmc",
+        addressTypes: { prod: ["34"], testnet: [] },
+        validator: BTCValidator,
+    },
+    {
+        name: "NXT",
+        symbol: "nxt",
+        validator: NXTValidator,
+    },
+    {
+        name: "BioCoin",
+        symbol: "bio",
+        addressTypes: { prod: ["19", "14"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "GarliCoin",
+        symbol: "grlc",
+        addressTypes: { prod: ["26", "05"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "VertCoin",
+        symbol: "vtc",
+        addressTypes: {
+            prod: ["0x", "47", "71", "05"],
+            testnet: ["6f", "c4"],
+        },
+        bech32Hrp: { prod: ["vtc"], testnet: ["tvtc"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "BitcoinGold",
+        symbol: "btg",
+        segwitHrp: { prod: "btg", testnet: "tbtg" },
+        addressTypes: { prod: ["26", "17"], testnet: ["6f", "c4"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Komodo",
+        symbol: "kmd",
+        addressTypes: { prod: ["3c", "55"], testnet: ["0", "5"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "BitcoinZ",
+        symbol: "btcz",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
-        validator: BTCValidator
-    }, {
-        name: 'BitcoinPrivate',
-        symbol: 'btcp',
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "BitcoinPrivate",
+        symbol: "btcp",
         expectedLength: 26,
-        addressTypes: { prod: ['1325', '13af'], testnet: ['1957', '19e0'] },
-        validator: BTCValidator
-    }, {
-        name: 'Hush',
-        symbol: 'hush',
+        addressTypes: { prod: ["1325", "13af"], testnet: ["1957", "19e0"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Hush",
+        symbol: "hush",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
-        validator: BTCValidator
-    }, {
-        name: 'SnowGem',
-        symbol: 'sng',
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "SnowGem",
+        symbol: "sng",
         expectedLength: 26,
-        addressTypes: { prod: ['1c28', '1c2d'], testnet: ['1d25', '1cba'] },
-        validator: BTCValidator
-    }, {
-        name: 'ZCash',
-        symbol: 'zec',
+        addressTypes: { prod: ["1c28", "1c2d"], testnet: ["1d25", "1cba"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "ZCash",
+        symbol: "zec",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
-        validator: BTCValidator
-    }, {
-        name: 'ZClassic',
-        symbol: 'zcl',
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "ZClassic",
+        symbol: "zcl",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
-        validator: BTCValidator
-    }, {
-        name: 'ZenCash',
-        symbol: 'zen',
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "ZenCash",
+        symbol: "zen",
         expectedLength: 26,
-        addressTypes: { prod: ['2089', '2096'], testnet: ['2092', '2098'] },
-        validator: BTCValidator
-    }, {
-        name: 'VoteCoin',
-        symbol: 'vot',
+        addressTypes: { prod: ["2089", "2096"], testnet: ["2092", "2098"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "VoteCoin",
+        symbol: "vot",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
-        validator: BTCValidator
-    }, {
-        name: 'Decred',
-        symbol: 'dcr',
-        addressTypes: { prod: ['073f', '071a'], testnet: ['0f21', '0efc'] },
-        hashFunction: 'blake256',
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Decred",
+        symbol: "dcr",
+        addressTypes: { prod: ["073f", "071a"], testnet: ["0f21", "0efc"] },
+        hashFunction: "blake256",
         expectedLength: 26,
-        validator: BTCValidator
-    }, {
-        name: 'GameCredits',
-        symbol: 'game',
-        addressTypes: { prod: ['26', '05'], testnet: [] },
-        validator: ETHValidator
-    }, {
-        name: 'PIVX',
-        symbol: 'pivx',
-        addressTypes: { prod: ['1e', '0d'], testnet: [] },
-        validator: BTCValidator
-    }, {
-        name: 'SolarCoin',
-        symbol: 'slr',
-        addressTypes: { prod: ['12', '05'], testnet: [] },
-        validator: BTCValidator
-    }, {
-        name: 'MonaCoin',
-        symbol: 'mona',
-        addressTypes: { prod: ['32', '37'], testnet: [] },
-        validator: BTCValidator
-    }, {
-        name: 'DigiByte',
-        symbol: 'dgb',
-        addressTypes: { prod: ['1e', '3f'], testnet: [] },
-        bech32Hrp: { prod: ['dgb', 'S'], testnet: [] },
-        validator: BTCValidator
-    }, {
-        name: 'Tether',
-        symbol: 'usdt',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4'] },
-        validator: USDTValidator
-    }, {
-        name: 'Ripple',
-        symbol: 'xrp',
+        validator: BTCValidator,
+    },
+    {
+        name: "GameCredits",
+        symbol: "game",
+        segwitHrp: { prod: "game", prod: "tgame" },
+        addressTypes: { prod: ["26", "05"], testnet: [] },
+        validator: ETHValidator,
+    },
+    {
+        name: "PIVX",
+        symbol: "pivx",
+        addressTypes: { prod: ["1e", "0d"], testnet: [] },
+        validator: BTCValidator,
+    },
+    {
+        name: "SolarCoin",
+        symbol: "slr",
+        addressTypes: { prod: ["12", "05"], testnet: [] },
+        validator: BTCValidator,
+    },
+    {
+        name: "MonaCoin",
+        symbol: "mona",
+        segwitHrp: { prod: "mona", prod: "tmona" },
+        addressTypes: { prod: ["32", "37"], testnet: ["6f", "75"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "DigiByte",
+        symbol: "dgb",
+        segwitHrp: { prod: "dgb" },
+        addressTypes: { prod: ["1e", "3f"], testnet: [] },
+        bech32Hrp: { prod: ["dgb", "S"], testnet: [] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Tether",
+        symbol: "usdt",
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4"] },
+        validator: USDTValidator,
+    },
+    {
+        name: "Ripple",
+        symbol: "xrp",
         validator: XRPValidator,
-    }, {
-        name: 'Dash',
-        symbol: 'dash',
-        addressTypes: { prod: ['4c', '10'], testnet: ['8c', '13'] },
-        validator: BTCValidator
-    }, {
-        name: 'Neo',
-        symbol: 'neo',
-        addressTypes: { prod: ['17'], testnet: [] },
-        validator: BTCValidator
-    }, {
-        name: 'NeoGas',
-        symbol: 'gas',
-        addressTypes: { prod: ['17'], testnet: [] },
-        validator: BTCValidator
-    }, {
-        name: 'Qtum',
-        symbol: 'qtum',
-        addressTypes: { prod: ['3a', '32'], testnet: ['78', '6e'] },
-        validator: BTCValidator
-    }, {
-        name: 'Waves',
-        symbol: 'waves',
-        addressTypes: { prod: ['0157'], testnet: ['0154'] },
+    },
+    {
+        name: "XRPL",
+        symbol: "xrpl",
+        validator: XRPValidator,
+    },
+    {
+        name: "Dash",
+        symbol: "dash",
+        addressTypes: { prod: ["4c", "10"], testnet: ["8c", "13"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Neo",
+        symbol: "neo",
+        addressTypes: { prod: ["17"], testnet: [] },
+        validator: BTCValidator,
+    },
+    {
+        name: "NeoGas",
+        symbol: "gas",
+        addressTypes: { prod: ["17"], testnet: [] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Qtum",
+        symbol: "qtum",
+        segwitHrp: { prod: "qc", prod: "tq" },
+        addressTypes: { prod: ["3a", "32"], testnet: ["78", "6e"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Waves",
+        symbol: "waves",
+        addressTypes: { prod: ["0157"], testnet: ["0154"] },
         expectedLength: 26,
-        hashFunction: 'blake256keccak256',
+        hashFunction: "blake256keccak256",
         regex: /^[a-zA-Z0-9]{35}$/,
-        validator: BTCValidator
-    }, {
-        name: 'Ethereum',
-        symbol: 'eth',
+        validator: BTCValidator,
+    },
+    {
+        name: "Ontology",
+        symbol: "ont",
+        validator: BTCValidator,
+        addressTypes: { prod: ["17", "41"] },
+    },
+    {
+        name: "Ravencoin",
+        symbol: "rvn",
+        validator: BTCValidator,
+        addressTypes: { prod: ["3c"] },
+    },
+    {
+        name: "Groestlcoin",
+        symbol: "grs",
+        addressTypes: { prod: ["24", "05"], testnet: ["6f", "c4"] },
+        segwitHrp: { prod: "grs", testnet: "tgrs" },
+        hashFunction: "groestl512x2",
+        validator: BTCValidator,
+    },
+    {
+        name: "Ethereum",
+        symbol: "eth",
         validator: ETHValidator,
-    }, {
-        name: 'EthereumPow',
-        symbol: 'ethw',
+    },
+    {
+        name: "EthereumPow",
+        symbol: "ethw",
         validator: ETHValidator,
-    }, {
-        name: 'EtherZero',
-        symbol: 'etz',
+    },
+    {
+        name: "EtherZero",
+        symbol: "etz",
         validator: ETHValidator,
-    }, {
-        name: 'EthereumClassic',
-        symbol: 'etc',
+    },
+    {
+        name: "EthereumClassic",
+        symbol: "etc",
         validator: ETHValidator,
-    }, {
-        name: 'Callisto',
-        symbol: 'clo',
+    },
+    {
+        name: "Callisto",
+        symbol: "clo",
         validator: ETHValidator,
-    }, {
-        name: 'Bankex',
-        symbol: 'bkx',
-        validator: ETHValidator
-    }, {
-        name: 'Cardano',
-        symbol: 'ada',
-        bech32Hrp: { prod: ['addr'], testnet: ['addr']},
-        validator: ADAValidator
-    }, {
-        name: 'Monero',
-        symbol: 'xmr',
-        addressTypes: { prod: ['18', '42'], testnet: ['53', '63'], stagenet: ['24'] },
-        iAddressTypes: { prod: ['19'], testnet: ['54'], stagenet: ['25'] },
-        validator: XMRValidator
-    }, {
-        name: 'Aragon',
-        symbol: 'ant',
-        validator: ETHValidator
-    }, {
-        name: 'Basic Attention Token',
-        symbol: 'bat',
-        validator: ETHValidator
-    }, {
-        name: 'Bancor',
-        symbol: 'bnt',
-        validator: ETHValidator
-    }, {
-        name: 'Civic',
-        symbol: 'cvc',
-        validator: ETHValidator
-    }, {
-        name: 'District0x',
-        symbol: 'dnt',
-        validator: ETHValidator
-    }, {
-        name: 'Gnosis',
-        symbol: 'gno',
-        validator: ETHValidator
-    }, {
-        name: 'Golem (GNT)',
-        symbol: 'gnt',
-        validator: ETHValidator
-    }, {
-        name: 'Golem',
-        symbol: 'glm',
-        validator: ETHValidator
-    },  {
-        name: 'Matchpool',
-        symbol: 'gup',
-        validator: ETHValidator
-    }, {
-        name: 'Melon',
-        symbol: 'mln',
-        validator: ETHValidator
-    }, {
-        name: 'Numeraire',
-        symbol: 'nmr',
-        validator: ETHValidator
-    }, {
-        name: 'OmiseGO',
-        symbol: 'omg',
-        validator: ETHValidator
-    }, {
-        name: 'TenX',
-        symbol: 'pay',
-        validator: ETHValidator
-    }, {
-        name: 'Ripio Credit Network',
-        symbol: 'rcn',
-        validator: ETHValidator
-    }, {
-        name: 'Augur',
-        symbol: 'rep',
-        validator: ETHValidator
-    }, {
-        name: 'iExec RLC',
-        symbol: 'rlc',
-        validator: ETHValidator
-    }, {
-        name: 'Salt',
-        symbol: 'salt',
-        validator: ETHValidator
-    }, {
-        name: 'Status',
-        symbol: 'snt',
-        validator: ETHValidator
-    }, {
-        name: 'Storj',
-        symbol: 'storj',
-        validator: ETHValidator
-    }, {
-        name: 'Swarm City',
-        symbol: 'swt',
-        validator: ETHValidator
-    }, {
-        name: 'TrueUSD',
-        symbol: 'tusd',
-        validator: ETHValidator
-    }, {
-        name: 'Wings',
-        symbol: 'wings',
-        validator: ETHValidator
-    }, {
-        name: '0x',
-        symbol: 'zrx',
-        validator: ETHValidator
-    }, {
-        name: 'Expanse',
-        symbol: 'exp',
-        validator: ETHValidator
-    }, {
-        name: 'Viberate',
-        symbol: 'vib',
-        validator: ETHValidator
-    }, {
-        name: 'Odyssey',
-        symbol: 'ocn',
-        validator: ETHValidator
-    }, {
-        name: 'Polymath',
-        symbol: 'poly',
-        validator: ETHValidator
-    }, {
-        name: 'Storm',
-        symbol: 'storm',
-        validator: ETHValidator
-    }, {
-        name: 'Nano',
-        symbol: 'nano',
+    },
+    {
+        name: "Bankex",
+        symbol: "bkx",
+        validator: ETHValidator,
+    },
+    {
+        name: "Cardano",
+        symbol: "ada",
+        bech32Hrp: { prod: ["addr"], testnet: ["addr"] },
+        validator: ADAValidator,
+    },
+    {
+        name: "Monero",
+        symbol: "xmr",
+        addressTypes: {
+            prod: ["18", "42"],
+            testnet: ["53", "63"],
+            stagenet: ["24"],
+        },
+        iAddressTypes: { prod: ["19"], testnet: ["54"], stagenet: ["25"] },
+        validator: XMRValidator,
+    },
+    {
+        name: "Aragon",
+        symbol: "ant",
+        validator: ETHValidator,
+    },
+    {
+        name: "Basic Attention Token",
+        symbol: "bat",
+        validator: ETHValidator,
+    },
+    {
+        name: "Bancor",
+        symbol: "bnt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Civic",
+        symbol: "cvc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Own", // Rebranded from Chainium
+        symbol: "chx",
+        validator: ETHValidator,
+    },
+    {
+        name: "District0x",
+        symbol: "dnt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Gnosis",
+        symbol: "gno",
+        validator: ETHValidator,
+    },
+    {
+        name: "Golem (GNT)",
+        symbol: "gnt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Golem",
+        symbol: "glm",
+        validator: ETHValidator,
+    },
+    {
+        name: "Matchpool",
+        symbol: "gup",
+        validator: ETHValidator,
+    },
+    {
+        name: "Melon",
+        symbol: "mln",
+        validator: ETHValidator,
+    },
+    {
+        name: "Numeraire",
+        symbol: "nmr",
+        validator: ETHValidator,
+    },
+    {
+        name: "OmiseGO",
+        symbol: "omg",
+        validator: ETHValidator,
+    },
+    {
+        name: "TenX",
+        symbol: "pay",
+        validator: ETHValidator,
+    },
+    {
+        name: "Ripio Credit Network",
+        symbol: "rcn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Augur",
+        symbol: "rep",
+        validator: ETHValidator,
+    },
+    {
+        name: "iExec RLC",
+        symbol: "rlc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Salt",
+        symbol: "salt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Status",
+        symbol: "snt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Storj",
+        symbol: "storj",
+        validator: ETHValidator,
+    },
+    {
+        name: "Swarm City",
+        symbol: "swt",
+        validator: ETHValidator,
+    },
+    {
+        name: "TrueUSD",
+        symbol: "tusd",
+        validator: ETHValidator,
+    },
+    {
+        name: "Wings",
+        symbol: "wings",
+        validator: ETHValidator,
+    },
+    {
+        name: "0x",
+        symbol: "zrx",
+        validator: ETHValidator,
+    },
+    {
+        name: "Expanse",
+        symbol: "exp",
+        validator: ETHValidator,
+    },
+    {
+        name: "Viberate",
+        symbol: "vib",
+        validator: ETHValidator,
+    },
+    {
+        name: "Odyssey",
+        symbol: "ocn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Polymath",
+        symbol: "poly",
+        validator: ETHValidator,
+    },
+    {
+        name: "Storm",
+        symbol: "storm",
+        validator: ETHValidator,
+    },
+    {
+        name: "FirstBlood",
+        symbol: "1st",
+        validator: ETHValidator,
+    },
+    {
+        name: "Arcblock",
+        symbol: "abt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Abyss Token",
+        symbol: "abyss",
+        validator: ETHValidator,
+    },
+    {
+        name: "adToken",
+        symbol: "adt",
+        validator: ETHValidator,
+    },
+    {
+        name: "AdEx",
+        symbol: "adx",
+        validator: ETHValidator,
+    },
+    {
+        name: "SingularityNET",
+        symbol: "agi",
+        validator: ETHValidator,
+    },
+    {
+        name: "Ambrosus",
+        symbol: "amb",
+        validator: ETHValidator,
+    },
+    {
+        name: "Ankr",
+        symbol: "ankr",
+        validator: ETHValidator,
+    },
+    {
+        name: "AppCoins",
+        symbol: "appc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Cosmos",
+        symbol: "atom",
+        validator: ATOMValidator,
+    },
+    {
+        name: "Aeron",
+        symbol: "arn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Aeternity",
+        symbol: "ae",
+        validator: AEValidator,
+    },
+    {
+        name: "ATLANT",
+        symbol: "atl",
+        validator: ETHValidator,
+    },
+    {
+        name: "aXpire",
+        symbol: "axpr",
+        validator: ETHValidator,
+    },
+    {
+        name: "Band Protocol",
+        symbol: "band",
+        validator: ETHValidator,
+    },
+    {
+        name: "Blockmason Credit Protocol",
+        symbol: "bcpt",
+        validator: ETHValidator,
+    },
+    {
+        name: "BitDegree",
+        symbol: "bdg",
+        validator: ETHValidator,
+    },
+    {
+        name: "BetterBetting",
+        symbol: "betr",
+        validator: ETHValidator,
+    },
+    {
+        name: "Bluzelle",
+        symbol: "blz",
+        validator: ETHValidator,
+    },
+    {
+        name: "Bread",
+        symbol: "brd",
+        validator: ETHValidator,
+    },
+    {
+        name: "Blocktrade Token",
+        symbol: "btt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Binance USD",
+        symbol: "busd",
+        validator: ETHValidator,
+    },
+    {
+        name: "CryptoBossCoin",
+        symbol: "cbc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Blox",
+        symbol: "cdt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Celer Network",
+        symbol: "celr",
+        validator: ETHValidator,
+    },
+    {
+        name: "Chiliz",
+        symbol: "chz",
+        validator: ETHValidator,
+    },
+    {
+        name: "Coinlancer",
+        symbol: "cl",
+        validator: ETHValidator,
+    },
+    {
+        name: "Cindicator",
+        symbol: "cnd",
+        validator: ETHValidator,
+    },
+    {
+        name: "Nano",
+        symbol: "nano",
         validator: NANOValidator,
-    }, {
-        name: 'RaiBlocks',
-        symbol: 'xrb',
+    },
+    {
+        name: "RaiBlocks",
+        symbol: "xrb",
         validator: NANOValidator,
-    }, {
-        name: 'Siacoin',
-        symbol: 'sc',
-        validator: SCValidator
-    }, {
-        name: 'HyperSpace',
-        symbol: 'xsc',
-        validator: SCValidator
-    }, {
-        name: 'loki',
-        symbol: 'loki',
-        addressTypes: { prod: ['114', '115', '116'], testnet: [] },
-        iAddressTypes: { prod: ['115'], testnet: [] },
-        validator: XMRValidator
-    }, {
-        name: 'LBRY Credits',
-        symbol: 'lbc',
-        addressTypes: { prod: ['55'], testnet: [] },
-        validator: BTCValidator
-    }, {
-        name: 'Tron',
-        symbol: 'trx',
+    },
+    {
+        name: "Siacoin",
+        symbol: "sc",
+        validator: SCValidator,
+    },
+    {
+        name: "HyperSpace",
+        symbol: "xsc",
+        validator: SCValidator,
+    },
+    {
+        name: "loki",
+        symbol: "loki",
+        addressTypes: { prod: ["114", "115", "116"], testnet: [] },
+        iAddressTypes: { prod: ["115"], testnet: [] },
+        validator: XMRValidator,
+    },
+    {
+        name: "LBRY Credits",
+        symbol: "lbc",
+        addressTypes: { prod: ["55"], testnet: [] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Tron",
+        symbol: "trx",
         addressTypes: { prod: [0x41], testnet: [0xa0] },
-        validator: TRXValidator
-    }, {
-        name: 'Nem',
-        symbol: 'xem',
-        validator: NEMValidator
-    }, {
-        name: 'Lisk',
-        symbol: 'lsk',
-        validator: LSKValidator
-    }, {
-        name: 'Stellar',
-        symbol: 'xlm',
+        validator: TRXValidator,
+    },
+    {
+        name: "Nem",
+        symbol: "xem",
+        validator: NEMValidator,
+    },
+    {
+        name: "Lisk",
+        symbol: "lsk",
+        validator: LSKValidator,
+    },
+    {
+        name: "Stellar",
+        symbol: "xlm",
         validator: XLMValidator,
-    }, {
-        name: 'BTU Protocol',
-        symbol: 'btu',
+    },
+    {
+        name: "BTU Protocol",
+        symbol: "btu",
         validator: ETHValidator,
-    }, {
-        name: 'Crypto.com Coin',
-        symbol: 'cro',
-        bech32Hrp: { prod: ['cro'], testnet: ['tcro']},
+    },
+    {
+        name: "Crypto.com Coin",
+        symbol: "cro",
+        bech32Hrp: { prod: ["cro"], testnet: ["tcro"] },
         validator: BIP173Validator,
-    }, {
-        name: 'Multi-collateral DAI',
-        symbol: 'dai',
+    },
+    {
+        name: "Multi-collateral DAI",
+        symbol: "dai",
         validator: ETHValidator,
-    }, {
-        name: 'Enjin Coin',
-        symbol: 'enj',
+    },
+    {
+        name: "Enjin Coin",
+        symbol: "enj",
         validator: ETHValidator,
-    }, {
-        name: 'HedgeTrade',
-        symbol: 'hedg',
+    },
+    {
+        name: "HedgeTrade",
+        symbol: "hedg",
         validator: ETHValidator,
-    }, {
-        name: 'Cred',
-        symbol: 'lba',
+    },
+    {
+        name: "Cred",
+        symbol: "lba",
         validator: ETHValidator,
-    }, {
-        name: 'Chainlink',
-        symbol: 'link',
+    },
+    {
+        name: "Chainlink",
+        symbol: "link",
         validator: ETHValidator,
-    }, {
-        name: 'Loom Network',
-        symbol: 'loom',
+    },
+    {
+        name: "Loom Network",
+        symbol: "loom",
         validator: ETHValidator,
-    }, {
-        name: 'Maker',
-        symbol: 'mkr',
+    },
+    {
+        name: "Maker",
+        symbol: "mkr",
         validator: ETHValidator,
-    }, {
-        name: 'Metal',
-        symbol: 'mtl',
+    },
+    {
+        name: "Metal",
+        symbol: "mtl",
         validator: ETHValidator,
-    }, {
-        name: 'Ocean Protocol',
-        symbol: 'ocean',
+    },
+    {
+        name: "Ocean Protocol",
+        symbol: "ocean",
         validator: ETHValidator,
-    }, {
-        name: 'Quant',
-        symbol: 'qnt',
+    },
+    {
+        name: "Quant",
+        symbol: "qnt",
         validator: ETHValidator,
-    }, {
-        name: 'Synthetix Network',
-        symbol: 'snx',
+    },
+    {
+        name: "Synthetix Network",
+        symbol: "snx",
         validator: ETHValidator,
-    }, {
-        name: 'SOLVE',
-        symbol: 'solve',
+    },
+    {
+        name: "SOLVE",
+        symbol: "solve",
         validator: ETHValidator,
-    }, {
-        name: 'Spendcoin',
-        symbol: 'spnd',
+    },
+    {
+        name: "Spendcoin",
+        symbol: "spnd",
         validator: ETHValidator,
-    }, {
-        name: 'TEMCO',
-        symbol: 'temco',
+    },
+    {
+        name: "TEMCO",
+        symbol: "temco",
         validator: ETHValidator,
-    }, {
-        name: 'EOS',
-        symbol: 'eos',
-        validator: EOSValidator
-    }, {
-        name: 'Tezos',
-        symbol: 'xtz',
-        validator: XTZValidator
-    }, {
-        name: 'VeChain',
-        symbol: 'vet',
-        validator: ETHValidator
     },
     {
-        name: 'StormX',
-        symbol: 'stmx',
-        validator: ETHValidator
+        name: "EOS",
+        symbol: "eos",
+        validator: EOSValidator,
     },
     {
-        name: 'AugurV2',
-        symbol: 'repv2',
-        validator: ETHValidator
+        name: "Tezos",
+        symbol: "xtz",
+        validator: XTZValidator,
     },
     {
-        name: 'FirmaChain',
-        symbol: 'fct',
-        validator: ETHValidator
+        name: "Cocos-BCX",
+        symbol: "cocos",
+        validator: ETHValidator,
     },
     {
-        name: 'BlockTrade',
-        symbol: 'btt',
-        validator: ETHValidator
+        name: "COS",
+        symbol: "cos",
+        validator: ETHValidator,
     },
     {
-        name: 'Quantum Resistant Ledger',
-        symbol: 'qrl',
-        validator: ETHValidator
+        name: "Cosmo Coin",
+        symbol: "cosm",
+        validator: ETHValidator,
     },
     {
-        name: 'Serve',
-        symbol: 'serv',
-        validator: ETHValidator
+        name: "Covesting",
+        symbol: "cov",
+        validator: ETHValidator,
     },
     {
-        name: 'Tap',
-        symbol: 'xtp',
-        validator: ETHValidator
+        name: "Crypterium",
+        symbol: "crpt",
+        validator: ETHValidator,
     },
     {
-        name: 'Compound',
-        symbol: 'comp',
-        validator: ETHValidator
+        name: "Daneel",
+        symbol: "dan",
+        validator: ETHValidator,
     },
     {
-        name: 'Paxos',
-        symbol: 'pax',
-        validator: ETHValidator
+        name: "Streamr DATAcoin",
+        symbol: "data",
+        validator: ETHValidator,
     },
     {
-        name: 'USD Coin',
-        symbol: 'usdc',
-        validator: ETHValidator
+        name: "Dentacoin",
+        symbol: "dcn",
+        validator: ETHValidator,
     },
     {
-        name: 'CUSD',
-        symbol: 'cusd',
-        validator: ETHValidator
+        name: "Dent",
+        symbol: "dent",
+        validator: ETHValidator,
     },
     {
-        name: 'Algorand',
-        symbol: 'algo',
-        validator: AlgoValidator
+        name: "DigixDAO",
+        symbol: "dgd",
+        validator: ETHValidator,
     },
     {
-        name: 'Polkadot',
-        symbol: 'dot',
-        validator: DotValidator
+        name: "Digitex Futures",
+        symbol: "dgtx",
+        validator: ETHValidator,
     },
     {
-        name: 'Uniswap Coin',
-        symbol: 'uni',
-        validator: ETHValidator
+        name: "Agrello",
+        symbol: "dlt",
+        validator: ETHValidator,
     },
     {
-        name: 'Aave Coin',
-        symbol: 'aave',
-        validator: ETHValidator
+        name: "Dock",
+        symbol: "dock",
+        validator: ETHValidator,
     },
     {
-        name: 'Matic',
-        symbol: 'matic',
-        validator: ETHValidator
+        name: "DomRaider",
+        symbol: "drt",
+        validator: ETHValidator,
     },
     {
-        name: 'Decentraland',
-        symbol: 'mana',
-        validator: ETHValidator
+        name: "Dusk Network",
+        symbol: "dusk",
+        validator: ETHValidator,
     },
     {
-        name: 'Solana',
-        symbol: 'sol',
+        name: "Edgeless",
+        symbol: "edg",
+        validator: ETHValidator,
+    },
+    {
+        name: "Eidoo",
+        symbol: "edo",
+        validator: ETHValidator,
+    },
+    {
+        name: "Electrify.Asia",
+        symbol: "elec",
+        validator: ETHValidator,
+    },
+    {
+        name: "aelf",
+        symbol: "elf",
+        validator: ETHValidator,
+    },
+    {
+        name: "Enigma",
+        symbol: "eng",
+        validator: ETHValidator,
+    },
+    {
+        name: "STASIS EURO",
+        symbol: "eurs",
+        validator: ETHValidator,
+    },
+    {
+        name: "Everex",
+        symbol: "evx",
+        validator: ETHValidator,
+    },
+    {
+        name: "VeChain",
+        symbol: "vet",
+        validator: ETHValidator,
+    },
+    {
+        name: "StormX",
+        symbol: "stmx",
+        validator: ETHValidator,
+    },
+    {
+        name: "AugurV2",
+        symbol: "repv2",
+        validator: ETHValidator,
+    },
+    {
+        name: "FirmaChain",
+        symbol: "fct",
+        validator: ETHValidator,
+    },
+    {
+        name: "BlockTrade",
+        symbol: "btt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Quantum Resistant Ledger",
+        symbol: "qrl",
+        validator: ETHValidator,
+    },
+    {
+        name: "Serve",
+        symbol: "serv",
+        validator: ETHValidator,
+    },
+    {
+        name: "Tap",
+        symbol: "xtp",
+        validator: ETHValidator,
+    },
+    {
+        name: "Compound",
+        symbol: "comp",
+        validator: ETHValidator,
+    },
+    {
+        name: "Paxos",
+        symbol: "pax",
+        validator: ETHValidator,
+    },
+    {
+        name: "USD Coin",
+        symbol: "usdc",
+        validator: ETHValidator,
+    },
+    {
+        name: "CUSD",
+        symbol: "cusd",
+        validator: ETHValidator,
+    },
+    {
+        name: "Algorand",
+        symbol: "algo",
+        validator: AlgoValidator,
+    },
+    {
+        name: "Polkadot",
+        symbol: "dot",
+        validator: DotValidator,
+    },
+    {
+        name: "Uniswap Coin",
+        symbol: "uni",
+        validator: ETHValidator,
+    },
+    {
+        name: "Aave Coin",
+        symbol: "aave",
+        validator: ETHValidator,
+    },
+    {
+        name: "Matic",
+        symbol: "matic",
+        validator: ETHValidator,
+    },
+    {
+        name: "Decentraland",
+        symbol: "mana",
+        validator: ETHValidator,
+    },
+    {
+        name: "Solana",
+        symbol: "sol",
         validator: Base58Validator,
         maxLength: 44,
-        minLength: 43
+        minLength: 43,
     },
     {
-        name: 'Binance',
-        symbol: 'bnb',
+        name: "Binance",
+        symbol: "bnb",
+        validator: BinanceValidator,
+    },
+    {
+        name: "BinanceChain",
+        symbol: "bnb",
+        validator: BinanceValidator,
+    },
+    {
+        name: "Binance Smart Chain",
+        symbol: "bsc",
         validator: ETHValidator,
     },
     {
-        name: 'Avalanche',
-        symbol: 'avax',
+        name: "Fortuna",
+        symbol: "fota",
         validator: ETHValidator,
+    },
+    {
+        name: "Fantom",
+        symbol: "ftm",
+        validator: ETHValidator,
+    },
+    {
+        name: "Etherparty",
+        symbol: "fuel",
+        validator: ETHValidator,
+    },
+    {
+        name: "Gifto",
+        symbol: "gto",
+        validator: ETHValidator,
+    },
+    {
+        name: "Gemini Dollar",
+        symbol: "gusd",
+        validator: ETHValidator,
+    },
+    {
+        name: "Genesis Vision",
+        symbol: "gvt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Humaniq",
+        symbol: "hmq",
+        validator: ETHValidator,
+    },
+    {
+        name: "Holo",
+        symbol: "hot",
+        validator: ETHValidator,
+    },
+    {
+        name: "HOQU",
+        symbol: "hqx",
+        validator: ETHValidator,
+    },
+    {
+        name: "Huobi Token",
+        symbol: "ht",
+        validator: ETHValidator,
+    },
+    {
+        name: "Avalanche",
+        symbol: "avax",
+        validator: ETHValidator,
+    },
+    {
+        name: "Ardor",
+        symbol: "ardr",
+        validator: ARDRValidator,
+    },
+    {
+        name: "Hedera Hashgraph",
+        symbol: "hbar",
+        validator: HBARValidator,
+    },
+    {
+        name: "ICON",
+        symbol: "icx",
+        validator: ICXValidator,
+    },
+    {
+        name: "Internet of Services",
+        symbol: "IOST",
+        validator: IOSTValidator,
+    },
+    // disable iota validation for now
+    // {
+    //     name: 'Iota',
+    //     symbol: 'iota',
+    //     validator: IOTAValidator,
+    // },
+    {
+        name: "IHT Real Estate Protocol",
+        symbol: "iht",
+        validator: ETHValidator,
+    },
+    {
+        name: "Insolar",
+        symbol: "ins",
+        validator: ETHValidator,
+    },
+    {
+        name: "IoTeX",
+        symbol: "iotx",
+        validator: ETHValidator,
+    },
+    {
+        name: "BitKan",
+        symbol: "kan",
+        validator: ETHValidator,
+    },
+    {
+        name: "Kcash",
+        symbol: "kcash",
+        validator: ETHValidator,
+    },
+    {
+        name: "KEY",
+        symbol: "key",
+        validator: ETHValidator,
+    },
+    {
+        name: "KickToken",
+        symbol: "kick",
+        validator: ETHValidator,
+    },
+    {
+        name: "Kyber Network",
+        symbol: "knc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Lambda",
+        symbol: "lamb",
+        validator: ETHValidator,
+    },
+    {
+        name: "Aave",
+        symbol: "lend",
+        validator: ETHValidator,
+    },
+    {
+        name: "LinkEye",
+        symbol: "let",
+        validator: ETHValidator,
+    },
+    {
+        name: "LIFE",
+        symbol: "life",
+        validator: ETHValidator,
+    },
+    {
+        name: "LockTrip",
+        symbol: "loc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Loopring",
+        symbol: "lrc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Lunyr",
+        symbol: "lun",
+        validator: ETHValidator,
+    },
+    {
+        name: "MCO",
+        symbol: "mco",
+        validator: ETHValidator,
+    },
+    {
+        name: "Moeda Loyalty Points",
+        symbol: "mda",
+        validator: ETHValidator,
+    },
+    {
+        name: "Measurable Data Token",
+        symbol: "mdt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Mainframe",
+        symbol: "mft",
+        validator: ETHValidator,
+    },
+    {
+        name: "Mithril",
+        symbol: "mith",
+        validator: ETHValidator,
+    },
+    {
+        name: "Molecular Future",
+        symbol: "mof",
+        validator: ETHValidator,
+    },
+    {
+        name: "Monetha",
+        symbol: "mth",
+        validator: ETHValidator,
+    },
+    {
+        name: "Mysterium",
+        symbol: "myst",
+        validator: ETHValidator,
+    },
+    {
+        name: "Nucleus Vision",
+        symbol: "ncash",
+        validator: ETHValidator,
+    },
+    {
+        name: "Nexo",
+        symbol: "nexo",
+        validator: ETHValidator,
+    },
+    {
+        name: "NAGA",
+        symbol: "ngc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Noah Coin",
+        symbol: "noah",
+        validator: ETHValidator,
+    },
+    {
+        name: "Pundi X",
+        symbol: "npxs",
+        validator: ETHValidator,
+    },
+    {
+        name: "NetKoin",
+        symbol: "ntk",
+        validator: ETHValidator,
+    },
+    {
+        name: "OAX",
+        symbol: "oax",
+        validator: ETHValidator,
+    },
+    // {
+    //     name: 'Menlo One',
+    //     symbol: 'one', // clashes with Harmony one
+    //     validator: ETHValidator,
+    // },
+    {
+        name: "SoMee.Social",
+        symbol: "ong",
+        validator: ETHValidator,
+    },
+    {
+        name: "ORS Group",
+        symbol: "ors",
+        validator: ETHValidator,
+    },
+    {
+        name: "OST",
+        symbol: "ost",
+        validator: ETHValidator,
+    },
+    {
+        name: "Patron",
+        symbol: "pat",
+        validator: ETHValidator,
+    },
+    {
+        name: "Peculium",
+        symbol: "pcl",
+        validator: ETHValidator,
+    },
+    {
+        name: "Perlin",
+        symbol: "perl",
+        validator: ETHValidator,
+    },
+    {
+        name: "Pillar",
+        symbol: "plr",
+        validator: ETHValidator,
+    },
+    {
+        name: "PumaPay",
+        symbol: "pma",
+        validator: ETHValidator,
+    },
+    {
+        name: "Po.et",
+        symbol: "poe",
+        validator: ETHValidator,
+    },
+    {
+        name: "Power Ledger",
+        symbol: "powr",
+        validator: ETHValidator,
+    },
+    {
+        name: "Populous",
+        symbol: "ppt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Presearch",
+        symbol: "pre",
+        validator: ETHValidator,
+    },
+    {
+        name: "Patientory",
+        symbol: "ptoy",
+        validator: ETHValidator,
+    },
+    {
+        name: "QuarkChain",
+        symbol: "qkc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Quantstamp",
+        symbol: "qsp",
+        validator: ETHValidator,
+    },
+    {
+        name: "Revain",
+        symbol: "r",
+        validator: ETHValidator,
+    },
+    {
+        name: "Raiden Network Token",
+        symbol: "rdn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Ren",
+        symbol: "ren",
+        validator: ETHValidator,
+    },
+    {
+        name: "Request",
+        symbol: "req",
+        validator: ETHValidator,
+    },
+    {
+        name: "Refereum",
+        symbol: "rfr",
+        validator: ETHValidator,
+    },
+    {
+        name: "SiaCashCoin",
+        symbol: "scc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Sentinel",
+        symbol: "sent",
+        validator: ETHValidator,
+    },
+    {
+        name: "SkinCoin",
+        symbol: "skin",
+        validator: ETHValidator,
+    },
+    {
+        name: "SunContract",
+        symbol: "snc",
+        validator: ETHValidator,
+    },
+    {
+        name: "SingularDTV",
+        symbol: "sngls",
+        validator: ETHValidator,
+    },
+    {
+        name: "SONM",
+        symbol: "snm",
+        validator: ETHValidator,
+    },
+    {
+        name: "All Sports",
+        symbol: "soc",
+        validator: ETHValidator,
+    },
+    {
+        name: "SIRIN LABS Token",
+        symbol: "srn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Stox",
+        symbol: "stx",
+        validator: ETHValidator,
+    },
+    {
+        name: "Substratum",
+        symbol: "sub",
+        validator: ETHValidator,
+    },
+    {
+        name: "SwftCoin",
+        symbol: "swftc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Lamden",
+        symbol: "tau",
+        validator: ETHValidator,
+    },
+    {
+        name: "Telcoin",
+        symbol: "tel",
+        validator: ETHValidator,
+    },
+    {
+        name: "Chronobank",
+        symbol: "time",
+        validator: ETHValidator,
+    },
+    {
+        name: "Monolith",
+        symbol: "tkn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Time New Bank",
+        symbol: "tnb",
+        validator: ETHValidator,
+    },
+    {
+        name: "Tierion",
+        symbol: "tnt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Tripio",
+        symbol: "trio",
+        validator: ETHValidator,
+    },
+    {
+        name: "WeTrust",
+        symbol: "trst",
+        validator: ETHValidator,
+    },
+    {
+        name: "USDT ERC-20",
+        symbol: "usdt20",
+        validator: ETHValidator,
+    },
+    {
+        name: "Utrust",
+        symbol: "utk",
+        validator: ETHValidator,
+    },
+    {
+        name: "BLOCKv",
+        symbol: "vee",
+        validator: ETHValidator,
+    },
+    {
+        name: "VIBE",
+        symbol: "vibe",
+        validator: ETHValidator,
+    },
+    {
+        name: "Tael",
+        symbol: "wabi",
+        validator: ETHValidator,
+    },
+    {
+        name: "WePower",
+        symbol: "wpr",
+        validator: ETHValidator,
+    },
+    {
+        name: "Waltonchain",
+        symbol: "wtc",
+        validator: ETHValidator,
+    },
+    {
+        name: "BlitzPredict",
+        symbol: "xbp",
+        validator: ETHValidator,
+    },
+    {
+        name: "CryptoFranc",
+        symbol: "xchf",
+        validator: ETHValidator,
+    },
+    {
+        name: "Exchange Union",
+        symbol: "xuc",
+        validator: ETHValidator,
+    },
+    {
+        name: "YOU COIN",
+        symbol: "you",
+        validator: ETHValidator,
+    },
+    {
+        name: "Zap",
+        symbol: "zap",
+        validator: ETHValidator,
+    },
+    {
+        name: "loki",
+        symbol: "loki",
+        addressTypes: { prod: ["114", "115", "116"], testnet: [] },
+        iAddressTypes: { prod: ["115"], testnet: [] },
+        validator: XMRValidator,
+    },
+    {
+        name: "STEEM",
+        symbol: "steem",
+        validator: STEEMValidator,
+    },
+    {
+        name: "Syscoin",
+        symbol: "sys",
+        addressTypes: { prod: ["3f"] },
+        validator: SYSValidator,
+    },
+    {
+        name: "Scopuly",
+        symbol: "sky",
+        validator: XLMValidator,
+    },
+    // {
+    //    name: 'PitisCoin',
+    //    symbol: 'pts', # FIXME: symbol collides with ProtoShares
+    //    validator: BTCValidator,
+    // },
+    {
+        name: "Luniverse",
+        symbol: "luniverse",
+        validator: ETHValidator,
+    },
+    {
+        name: "EOS",
+        symbol: "eos",
+        validator: EOSValidator,
+    },
+    {
+        name: "Verge",
+        symbol: "xvg",
+        addressTypes: { prod: ["1e"], testnet: ["6F"] },
+        validator: BTCValidator,
+    },
+    {
+        name: "Zilliqa",
+        symbol: "zil",
+        validator: ZILValidator,
+    },
+    {
+        name: "Chia",
+        symbol: "xch",
+        validator: ChiaValidator,
+    },
+    {
+        name: "Harmony",
+        symbol: "one",
+        validator: HarmonyValidator,
+    },
+    {
+        name: "DigitalBits",
+        symbol: "xdb",
+        validator: XLMValidator,
+    },
+    {
+        name: "Polymesh",
+        symbol: "polyx",
+        validator: PolymeshValidator,
+    },
+    {
+        name: "Arbitrum",
+        symbol: "arb",
+        validator: ETHValidator,
+    },
+    {
+        name: "Coreum",
+        symbol: "core",
+        validator: CoreumValidator,
     },
 ];
 
-
-    module.exports = {
+module.exports = {
     getByNameOrSymbol: function (currencyNameOrSymbol) {
         var nameOrSymbol = currencyNameOrSymbol.toLowerCase();
         return CURRENCIES.find(function (currency) {
-            return currency.name.toLowerCase() === nameOrSymbol || currency.symbol.toLowerCase() === nameOrSymbol
+            return (
+                currency.name.toLowerCase() === nameOrSymbol ||
+                currency.symbol.toLowerCase() === nameOrSymbol
+            );
         });
     },
     getAll: function () {
         return CURRENCIES;
-    }
+    },
 };
 
 ////spit out details for readme.md
@@ -12506,8 +13811,7 @@ var CURRENCIES = [{
 //     .forEach(c => console.log(`"${c.name}","${c.symbol}",`));
 //
 
-
-},{"./ada_validator":37,"./algo_validator":38,"./base58_validator":39,"./bch_validator":40,"./bip173_validator":41,"./bitcoin_validator":42,"./dot_validator":54,"./eos_validator":55,"./ethereum_validator":56,"./lisk_validator":57,"./monero_validator":58,"./nano_validator":59,"./nem_validator":60,"./ripple_validator":61,"./siacoin_validator":62,"./stellar_validator":63,"./tezos_validator":64,"./tron_validator":65,"./usdt_validator":66}],54:[function(require,module,exports){
+},{"./ada_validator":38,"./ae_validator":39,"./algo_validator":40,"./ardr_validator":41,"./atom_validator":42,"./base58_validator":43,"./bch_validator":44,"./binance_validator":45,"./bip173_validator":46,"./bitcoin_validator":47,"./chia_validator":48,"./coreum_validator":49,"./dot_validator":61,"./eos_validator":62,"./ethereum_validator":63,"./harmony_validator":64,"./hbar_validator":65,"./icx_validator":66,"./iost_validator":67,"./lisk_validator":68,"./monero_validator":69,"./nano_validator":70,"./nem_validator":71,"./nxt_validator":72,"./polymesh_validator":73,"./ripple_validator":74,"./siacoin_validator":75,"./steem_validator":76,"./stellar_validator":77,"./sys_validator":78,"./tezos_validator":79,"./tron_validator":80,"./usdt_validator":81,"./zil_validator":83}],61:[function(require,module,exports){
 const cryptoUtils = require('./crypto/utils');
 
 // from https://github.com/paritytech/substrate/wiki/External-Address-Format-(SS58)
@@ -12568,7 +13872,7 @@ module.exports = {
     }
 }
 
-},{"./crypto/utils":52}],55:[function(require,module,exports){
+},{"./crypto/utils":59}],62:[function(require,module,exports){
 function isValidEOSAddress (address, currency, networkType) {
   var regex = /^[a-z0-9.]+$/g // Must be numbers, lowercase letters and decimal points only
   if (address.search(regex) !== -1 && address.length === 12) {
@@ -12584,7 +13888,7 @@ module.exports = {
   }
 }
 
-},{}],56:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
 
 module.exports = {
@@ -12620,7 +13924,74 @@ module.exports = {
     }
 };
 
-},{"./crypto/utils":52}],57:[function(require,module,exports){
+},{"./crypto/utils":59}],64:[function(require,module,exports){
+var bech32 = require('./crypto/bech32');
+var ETHValidator = require('./ethereum_validator');
+
+const isValidAddress = function(address) {
+    if (address && address.substring(0, 3) !== 'one') {
+        return ETHValidator.isValidAddress(address);
+    }
+
+    const decoded = bech32.decode(address, bech32.encodings.BECH32);
+
+    if (decoded && decoded.hrp.toLowerCase() === 'one') {
+      return true;
+    }
+
+    return false;
+}
+
+module.exports = {
+    isValidAddress
+};
+
+},{"./crypto/bech32":52,"./ethereum_validator":63}],65:[function(require,module,exports){
+function isValidHBarAddress (address) {
+  const split = address.split('.')
+  if (split[0] !== '0' || split[1] !== '0') {
+    return false
+  }
+  if (split[2].length <= 6 && /^\d+$/g.test(split[2])) {
+    return true
+  }
+}
+
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    return isValidHBarAddress(address)
+  },
+}
+
+
+},{}],66:[function(require,module,exports){
+function isValidICXAddress (address, currency, networkType) {
+  var regex = /^hx[0-9a-f]{40}$/g // Begins with hx followed by 40 hex chars
+  if (address.search(regex) !== -1) {
+    return true
+  } else {
+    return false
+  }
+}
+
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    return isValidICXAddress(address, currency, networkType)
+  },
+}
+
+
+},{}],67:[function(require,module,exports){
+const iostRegex = new RegExp('^[a-z0-9_]{5,11}$')
+
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    return iostRegex.test(address)
+  },
+}
+
+
+},{}],68:[function(require,module,exports){
 (function (Buffer){(function (){
 var cryptoUtils = require('./crypto/utils');
 
@@ -12642,7 +14013,7 @@ module.exports = {
     }
 };
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./crypto/utils":52,"buffer":4}],58:[function(require,module,exports){
+},{"./crypto/utils":59,"buffer":5}],69:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils')
 var cnBase58 = require('./crypto/cnBase58')
 
@@ -12708,7 +14079,7 @@ module.exports = {
   }
 }
 
-},{"./crypto/cnBase58":49,"./crypto/utils":52}],59:[function(require,module,exports){
+},{"./crypto/cnBase58":56,"./crypto/utils":59}],70:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
 var baseX = require('base-x');
 
@@ -12737,7 +14108,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/utils":52,"base-x":1}],60:[function(require,module,exports){
+},{"./crypto/utils":59,"base-x":1}],71:[function(require,module,exports){
 (function (Buffer){(function (){
 var cryptoUtils = require('./crypto/utils');
 
@@ -12764,7 +14135,62 @@ module.exports = {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./crypto/utils":52,"buffer":4}],61:[function(require,module,exports){
+},{"./crypto/utils":59,"buffer":5}],72:[function(require,module,exports){
+const nxtRegex = new RegExp("^NXT(-[A-Z0-9]{4}){3}-[A-Z0-9]{5}$");
+
+module.exports = {
+    isValidAddress: function (address, currency, networkType) {
+        if (!nxtRegex.test(address)) {
+            return false;
+        }
+        return true;
+    },
+};
+
+},{}],73:[function(require,module,exports){
+var cryptoUtils = require("./crypto/utils");
+
+module.exports = {
+    isValidAddress: function (address) {
+        if (!/^0x[0-9a-fA-F]{64}$/.test(address)) {
+            // Check if it has the basic requirements of an address
+            return false;
+        }
+
+        if (
+            /^0x[0-9a-f]{64}$/.test(address) ||
+            /^0x?[0-9A-F]{64}$/.test(address)
+        ) {
+            // If it's all small caps or all all caps, return true
+            return true;
+        }
+
+        // Otherwise check each case
+        return this.verifyChecksum(address);
+    },
+    verifyChecksum: function (address) {
+        // Check each case
+        address = address.replace("0x", "");
+
+        var addressHash = cryptoUtils.keccak256(address.toLowerCase());
+
+        for (var i = 0; i < 64; i++) {
+            // The nth letter should be uppercase if the nth digit of casemap is 1
+            if (
+                (parseInt(addressHash[i], 16) > 7 &&
+                    address[i].toUpperCase() !== address[i]) ||
+                (parseInt(addressHash[i], 16) <= 7 &&
+                    address[i].toLowerCase() !== address[i])
+            ) {
+                return false;
+            }
+        }
+
+        return true;
+    },
+};
+
+},{"./crypto/utils":59}],74:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
 var baseX = require('base-x');
 
@@ -12794,7 +14220,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/utils":52,"base-x":1}],62:[function(require,module,exports){
+},{"./crypto/utils":59,"base-x":1}],75:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils')
 var isEqual = require('lodash.isequal')
 
@@ -12824,26 +14250,58 @@ module.exports = {
   }
 }
 
-},{"./crypto/utils":52,"lodash.isequal":34}],63:[function(require,module,exports){
-var baseX = require('base-x');
-var crc = require('crc');
-var cryptoUtils = require('./crypto/utils');
+},{"./crypto/utils":59,"lodash.isequal":35}],76:[function(require,module,exports){
+const accountRegex = new RegExp('^[a-z0-9-.]{3,}$')
+const segmentRegex = new RegExp('^[a-z][a-z0-9-]+[a-z0-9]$')
+const doubleDashRegex = new RegExp('--')
 
-var ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    if (!accountRegex.test(address)) {
+      return false;
+    }
+    let segments = address.split('.')
+    for (let i = 0; i < segments.length; i++) {
+      let segment = segments[i]
+      if (segment.length < 3) {
+        return false;
+      }
+      if (!segmentRegex.test(segment)) {
+        return false;
+      }
+      if (doubleDashRegex.test(segment)) {
+        return false;
+      }
+    }
+    return true;
+  },
+}
+
+
+},{}],77:[function(require,module,exports){
+var baseX = require("base-x");
+var crc = require("crc");
+var cryptoUtils = require("./crypto/utils");
+
+var ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 var base32 = baseX(ALPHABET);
-var regexp = new RegExp('^[' + ALPHABET + ']{56}$');
-var ed25519PublicKeyVersionByte = (6 << 3);
+var regexp = new RegExp("^[" + ALPHABET + "]{56}$");
+var regexpM = new RegExp("^[" + ALPHABET + "]{69}$");
+var ed25519PublicKeyVersionByte = 6 << 3; // G
+const med25519PublicKeyVersionByte = 12 << 3; // M
 
 function swap16(number) {
-    var lower = number & 0xFF;
-    var upper = (number >> 8) & 0xFF;
+    var lower = number & 0xff;
+    var upper = (number >> 8) & 0xff;
     return (lower << 8) | upper;
 }
 
 module.exports = {
     isValidAddress: function (address) {
-        if (regexp.test(address)) {
+        if (address.charAt(0) === "M" && regexpM.test(address)) {
+            return true;
+        } else if (regexp.test(address)) {
             return this.verifyChecksum(address);
         }
 
@@ -12853,18 +14311,35 @@ module.exports = {
     verifyChecksum: function (address) {
         // based on https://github.com/stellar/js-stellar-base/blob/master/src/strkey.js#L126
         var bytes = base32.decode(address);
-        if (bytes[0] !== ed25519PublicKeyVersionByte) {
+        if (
+            bytes[0] !== ed25519PublicKeyVersionByte &&
+            bytes[0] !== med25519PublicKeyVersionByte
+        ) {
             return false;
         }
 
-        var computedChecksum = cryptoUtils.numberToHex(swap16(crc.crc16xmodem(bytes.slice(0, -2))), 4);
+        var computedChecksum = cryptoUtils.numberToHex(
+            swap16(crc.crc16xmodem(bytes.slice(0, -2))),
+            4
+        );
         var checksum = cryptoUtils.toHex(bytes.slice(-2));
 
-        return computedChecksum === checksum
-    }
+        return computedChecksum === checksum;
+    },
 };
 
-},{"./crypto/utils":52,"base-x":1,"crc":30}],64:[function(require,module,exports){
+},{"./crypto/utils":59,"base-x":1,"crc":31}],78:[function(require,module,exports){
+const BTCValidator = require('./bitcoin_validator');
+var regexp = new RegExp('^sys1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{39}$')
+
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    return regexp.test(address) || BTCValidator.isValidAddress(address, currency, networkType)
+  },
+}
+
+
+},{"./bitcoin_validator":47}],79:[function(require,module,exports){
 const base58 = require('./crypto/base58');
 const cryptoUtils = require('./crypto/utils');
 
@@ -12902,7 +14377,7 @@ module.exports = {
     isValidAddress
 };
 
-},{"./crypto/base58":44,"./crypto/utils":52}],65:[function(require,module,exports){
+},{"./crypto/base58":51,"./crypto/utils":59}],80:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
 
 function decodeBase58Address(base58Sting) {
@@ -12966,7 +14441,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/utils":52}],66:[function(require,module,exports){
+},{"./crypto/utils":59}],81:[function(require,module,exports){
 var BTCValidator = require('./bitcoin_validator');
 var ETHValidator = require('./ethereum_validator');
 
@@ -12989,7 +14464,7 @@ module.exports = {
     }
 };
 
-},{"./bitcoin_validator":42,"./ethereum_validator":56}],67:[function(require,module,exports){
+},{"./bitcoin_validator":47,"./ethereum_validator":63}],82:[function(require,module,exports){
 var currencies = require('./currencies');
 
 var DEFAULT_CURRENCY_NAME = 'bitcoin';
@@ -13016,5 +14491,24 @@ module.exports = {
     }
 };
 
-},{"./currencies":53}]},{},[67])(67)
+},{"./currencies":60}],83:[function(require,module,exports){
+const { bech32 } = require('bech32');
+
+const ALLOWED_CHARS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+
+var regexp = new RegExp('^(zil)1([' + ALLOWED_CHARS + ']+)$') // zil + bech32 separated by '1'
+
+module.exports = {
+  isValidAddress: function (address, currency, networkType) {
+    let match = regexp.exec(address)
+    if (!match) {
+      return false;
+    }
+    const decoded = bech32.decode(address);
+    return decoded && decoded.words.length === 32;
+  },
+}
+
+
+},{"bech32":3}]},{},[82])(82)
 });
